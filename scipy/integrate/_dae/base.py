@@ -1,28 +1,38 @@
 import numpy as np
 
 
-def check_arguments(fun, y0, support_complex):
+def check_arguments(fun, y0, y_dot0, support_complex):
     """Helper function for checking arguments common to all solvers."""
     y0 = np.asarray(y0)
-    if np.issubdtype(y0.dtype, np.complexfloating):
+    y_dot0 = np.asarray(y_dot0)
+    if np.issubdtype(y0.dtype, np.complexfloating) or np.issubdtype(y_dot0.dtype, np.complexfloating):
         if not support_complex:
-            raise ValueError("`y0` is complex, but the chosen solver does "
-                             "not support integration in a complex domain.")
+            raise ValueError("`y0` or `y_dot0` is complex, but the chosen "
+                             "solver does not support integration in a "
+                             "complex domain.")
         dtype = complex
     else:
         dtype = float
     y0 = y0.astype(dtype, copy=False)
+    y_dot0 = y_dot0.astype(dtype, copy=False)
 
     if y0.ndim != 1:
         raise ValueError("`y0` must be 1-dimensional.")
+    if y_dot0.ndim != 1:
+        raise ValueError("`y_dot0` must be 1-dimensional.")
+    
+    if y0.shape != y_dot0.shape:
+        raise ValueError("`y0` and `y_dot0` must be of same shape.")
 
     if not np.isfinite(y0).all():
         raise ValueError("All components of the initial state `y0` must be finite.")
+    if not np.isfinite(y_dot0).all():
+        raise ValueError("All components of the initial state `y_dot0` must be finite.")
 
-    def fun_wrapped(t, y):
-        return np.asarray(fun(t, y), dtype=dtype)
+    def fun_wrapped(t, y, y_dot):
+        return np.asarray(fun(t, y, y_dot), dtype=dtype)
 
-    return fun_wrapped, y0
+    return fun_wrapped, y0, y_dot0
 
 
 class DaeSolver:
@@ -67,7 +77,7 @@ class DaeSolver:
     Parameters
     ----------
     fun : callable
-        Function defining the DAE system: ``F(t, y, y_dot) = 0``. The calling 
+        Function defining the DAE system: ``f(t, y, y_dot) = 0``. The calling 
         signature is ``fun(t, y, y_dot)``, where ``t`` is a scalar and 
         ``y, y_dot`` are ndarrays with 
         ``len(y) = len(y_dot) = len(y0) = len(y_dot0)``. ``fun`` must return 
@@ -140,26 +150,26 @@ class DaeSolver:
                  support_complex=False):
         self.t_old = None
         self.t = t0
-        self._fun, self.y = check_arguments(fun, y0, support_complex)
+        self._fun, self.y, self.y_dot = check_arguments(fun, y0, y_dot0, support_complex)
         self.t_bound = t_bound
         self.vectorized = vectorized
 
         if vectorized:
-            def fun_single(t, y):
-                return self._fun(t, y[:, None]).ravel()
+            def fun_single(t, y, y_dot):
+                return self._fun(t, y[:, None], y_dot[:, None]).ravel()
             fun_vectorized = self._fun
         else:
             fun_single = self._fun
 
-            def fun_vectorized(t, y):
+            def fun_vectorized(t, y, y_dot):
                 f = np.empty_like(y)
-                for i, yi in enumerate(y.T):
-                    f[:, i] = self._fun(t, yi)
+                for i, (yi, y_doti) in enumerate(zip(y.T, y_dot.T)):
+                    f[:, i] = self._fun(t, yi, y_doti)
                 return f
 
-        def fun(t, y):
+        def fun(t, y, y_dot):
             self.nfev += 1
-            return self.fun_single(t, y)
+            return self.fun_single(t, y, y_dot)
 
         self.fun = fun
         self.fun_single = fun_single
@@ -227,7 +237,8 @@ class DaeSolver:
 
         if self.n == 0 or self.t == self.t_old:
             # Handle corner cases of empty solver and no integration.
-            return ConstantDenseOutput(self.t_old, self.t, self.y)
+            # TODO: Does this work for y_dot as well?
+            return ConstantDenseOutput(self.t_old, self.t, self.y, self.y_dot)
         else:
             return self._dense_output_impl()
 
@@ -239,7 +250,7 @@ class DaeSolver:
 
 
 class DenseOutput:
-    """Base class for local interpolant over step made by an ODE solver.
+    """Base class for local interpolant over step made by an DAE solver.
 
     It interpolates between `t_min` and `t_max` (see Attributes below).
     Evaluation outside this interval is not forbidden, but the accuracy is not
@@ -269,6 +280,10 @@ class DenseOutput:
         y : ndarray, shape (n,) or (n, n_points)
             Computed values. Shape depends on whether `t` was a scalar or a
             1-D array.
+        # TODO: Check if this is possible.
+        y_dot : ndarray, shape (n,) or (n, n_points)
+            Computed derivatives. Shape depends on whether `t` was a scalar or a
+            1-D array.
         """
         t = np.asarray(t)
         if t.ndim > 1:
@@ -285,14 +300,17 @@ class ConstantDenseOutput(DenseOutput):
     This class used for degenerate integration cases: equal integration limits
     or a system with 0 equations.
     """
-    def __init__(self, t_old, t, value):
+    def __init__(self, t_old, t, value, derivative):
         super().__init__(t_old, t)
         self.value = value
+        self.derivative = derivative
 
     def _call_impl(self, t):
         if t.ndim == 0:
-            return self.value
+            return self.value, self.derivative
         else:
-            ret = np.empty((self.value.shape[0], t.shape[0]))
-            ret[:] = self.value[:, None]
-            return ret
+            ret_value = np.empty((self.value.shape[0], t.shape[0]))
+            ret_value[:] = self.value[:, None]
+            ret_derivative = np.empty((self.derivative.shape[0], t.shape[0]))
+            ret_derivative[:] = self.derivative[:, None]
+            return ret_value, ret_derivative

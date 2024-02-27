@@ -67,6 +67,7 @@ def solve_event_equation(event, sol, t_old, t):
     root : float
         Found solution.
     """
+    raise NotImplementedError
     from scipy.optimize import brentq
     return brentq(lambda t: event(t, sol(t)), t_old, t,
                   xtol=4 * EPS, rtol=4 * EPS)
@@ -99,6 +100,7 @@ def handle_events(sol, events, active_events, is_terminal, t_old, t):
     terminate : bool
         Whether a terminal event occurred.
     """
+    raise NotImplementedError
     roots = [solve_event_equation(events[event_index], sol, t_old, t)
              for event_index in active_events]
 
@@ -136,6 +138,7 @@ def find_active_events(g, g_new, direction):
     active_events : ndarray
         Indices of events which occurred during the step.
     """
+    raise NotImplementedError
     g, g_new = np.asarray(g), np.asarray(g_new)
     up = (g <= 0) & (g_new >= 0)
     down = (g >= 0) & (g_new <= 0)
@@ -147,38 +150,42 @@ def find_active_events(g, g_new, direction):
     return np.nonzero(mask)[0]
 
 
-def solve_ivp(fun, t_span, y0, method='RK45', t_eval=None, dense_output=False,
-              events=None, vectorized=False, args=None, **options):
-    """Solve an initial value problem for a system of ODEs.
+def solve_dae(fun, t_span, y0, y_dot0=None, method='Radau', t_eval=None, 
+              dense_output=False, events=None, vectorized=False, args=None, 
+              **options):
+    """Solve an initial value problem for a system of DAEs.
 
     This function numerically integrates a system of ordinary differential
     equations given an initial value::
 
-        dy / dt = f(t, y)
+        f(t, y, y') = 0
         y(t0) = y0
+        y'(t0) = y_dot0
 
-    Here t is a 1-D independent variable (time), y(t) is an
-    N-D vector-valued function (state), and an N-D
-    vector-valued function f(t, y) determines the differential equations.
-    The goal is to find y(t) approximately satisfying the differential
-    equations, given an initial value y(t0)=y0.
+    Here t is a 1-D independent variable (time), y(t) is an N-D vector-valued 
+    function (state), y'(t) is an N-D vector-valued function (state 
+    derivative) and an N-D vector-valued function f(t, y, y') determines the 
+    differential algebraic equations.
+    The goal is to find y(t) and y'(t) approximately satisfying the differential
+    algebraic equations, given initial values y(t0)=y0 and y'(t0)=y_dot0.
 
     Some of the solvers support integration in the complex domain, but note
-    that for stiff ODE solvers, the right-hand side must be
-    complex-differentiable (satisfy Cauchy-Riemann equations [11]_).
-    To solve a problem in the complex domain, pass y0 with a complex data type.
-    Another option always available is to rewrite your problem for real and
-    imaginary parts separately.
+    that the function f must be complex-differentiable (satisfy Cauchy-Riemann 
+    equations [11]_).
+    To solve a problem in the complex domain, pass y0 or y_dot0 with a complex 
+    data type. Another option always available is to rewrite your problem for 
+    real and imaginary parts separately.
 
     Parameters
     ----------
     fun : callable
-        Right-hand side of the system: the time derivative of the state ``y``
-        at time ``t``. The calling signature is ``fun(t, y)``, where ``t`` is a
-        scalar and ``y`` is an ndarray with ``len(y) = len(y0)``. Additional
+        Function defining the DAE system: ``f(t, y, y_dot) = 0``. The calling 
+        signature is ``fun(t, y, y_dot)``, where ``t`` is a scalar and 
+        ``y, y_dot`` are ndarrays with 
+        ``len(y) = len(y_dot) = len(y0) = len(y_dot0)``. Additional 
         arguments need to be passed if ``args`` is used (see documentation of
         ``args`` argument). ``fun`` must return an array of the same shape as
-        ``y``. See `vectorized` for more information.
+        ``y`` and ``y_dot``. See `vectorized` for more information.
     t_span : 2-member sequence
         Interval of integration (t0, tf). The solver starts with t=t0 and
         integrates until it reaches t=tf. Both t0 and tf must be floats
@@ -186,25 +193,12 @@ def solve_ivp(fun, t_span, y0, method='RK45', t_eval=None, dense_output=False,
     y0 : array_like, shape (n,)
         Initial state. For problems in the complex domain, pass `y0` with a
         complex data type (even if the initial value is purely real).
-    method : string or `OdeSolver`, optional
+    y_dot0 : array_like, shape (n,), optional
+        Initial derivative. For problems in the complex domain, pass `y_dot0` 
+        with a complex data type (even if the initial value is purely real).
+    method : string or `DaeSolver`, optional
         Integration method to use:
 
-            * 'RK45' (default): Explicit Runge-Kutta method of order 5(4) [1]_.
-              The error is controlled assuming accuracy of the fourth-order
-              method, but steps are taken using the fifth-order accurate
-              formula (local extrapolation is done). A quartic interpolation
-              polynomial is used for the dense output [2]_. Can be applied in
-              the complex domain.
-            * 'RK23': Explicit Runge-Kutta method of order 3(2) [3]_. The error
-              is controlled assuming accuracy of the second-order method, but
-              steps are taken using the third-order accurate formula (local
-              extrapolation is done). A cubic Hermite polynomial is used for the
-              dense output. Can be applied in the complex domain.
-            * 'DOP853': Explicit Runge-Kutta method of order 8 [13]_.
-              Python implementation of the "DOP853" algorithm originally
-              written in Fortran [14]_. A 7-th order interpolation polynomial
-              accurate to 7-th order is used for the dense output.
-              Can be applied in the complex domain.
             * 'Radau': Implicit Runge-Kutta method of the Radau IIA family of
               order 5 [4]_. The error is controlled with a third-order accurate
               embedded formula. A cubic polynomial which satisfies the
@@ -215,22 +209,8 @@ def solve_ivp(fun, t_span, y0, method='RK45', t_eval=None, dense_output=False,
               in [6]_. A quasi-constant step scheme is used and accuracy is
               enhanced using the NDF modification. Can be applied in the
               complex domain.
-            * 'LSODA': Adams/BDF method with automatic stiffness detection and
-              switching [7]_, [8]_. This is a wrapper of the Fortran solver
-              from ODEPACK.
 
-        Explicit Runge-Kutta methods ('RK23', 'RK45', 'DOP853') should be used
-        for non-stiff problems and implicit methods ('Radau', 'BDF') for
-        stiff problems [9]_. Among Runge-Kutta methods, 'DOP853' is recommended
-        for solving with high precision (low values of `rtol` and `atol`).
-
-        If not sure, first try to run 'RK45'. If it makes unusually many
-        iterations, diverges, or fails, your problem is likely to be stiff and
-        you should use 'Radau' or 'BDF'. 'LSODA' can also be a good universal
-        choice, but it might be somewhat less convenient to work with as it
-        wraps old Fortran code.
-
-        You can also pass an arbitrary class derived from `OdeSolver` which
+        You can also pass an arbitrary class derived from `DaeSolver` which
         implements the solver.
     t_eval : array_like or None, optional
         Times at which to store the computed solution, must be sorted and lie
