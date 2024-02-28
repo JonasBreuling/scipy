@@ -1,4 +1,7 @@
 import numpy as np
+from scipy.sparse import issparse, csc_matrix
+from scipy.optimize._numdiff import group_columns
+from .common import num_jac
 
 
 def check_arguments(fun, y0, y_dot0, support_complex):
@@ -35,6 +38,7 @@ def check_arguments(fun, y0, y_dot0, support_complex):
     return fun_wrapped, y0, y_dot0
 
 
+# TODO: Add jac_y and jac_y_dot here, otherwise we cannot check these in the base class.
 class DaeSolver:
     """Base class for DAE solvers.
 
@@ -94,6 +98,11 @@ class DaeSolver:
     t_bound : float
         Boundary time --- the integration won't continue beyond it. It also
         determines the direction of the integration.
+    var_index : array_like, shape (n,), optional
+        Differentiation index of the respective row of f(t, y, y') = 0. 
+        Depending on this index, the error estimates are scaled by the 
+        stepsize h**(index - 1) in order to ensure convergence.
+        Default is None, which means all equations are differential equations.
     vectorized : bool
         Whether `fun` can be called in a vectorized fashion. Default is False.
 
@@ -146,8 +155,8 @@ class DaeSolver:
     """
     TOO_SMALL_STEP = "Required step size is less than spacing between numbers."
 
-    def __init__(self, fun, t0, y0, y_dot0, t_bound, vectorized,
-                 support_complex=False):
+    def __init__(self, fun, jac_y, jac_y_dot, t0, y0, y_dot0, t_bound, 
+                 var_index, vectorized, support_complex=False):
         self.t_old = None
         self.t = t0
         self._fun, self.y, self.y_dot = check_arguments(fun, y0, y_dot0, support_complex)
@@ -175,6 +184,25 @@ class DaeSolver:
         self.fun_single = fun_single
         self.fun_vectorized = fun_vectorized
 
+        # TODO: Move this to base class? How it is used might depend on the solver 
+        #       but we have to supply it, see Hairer's radau.f or dassl.f from Petzold.
+        # differentiation index of the individual equation
+        if var_index is None:
+            self.var_index = np.zeros((y0.size,)) # assume all differential
+        else:
+            assert isinstance(var_index, np.ndarray), '`var_index` must be an array'
+            assert var_index.ndim == 1
+            assert var_index.size == y0.size
+            self.var_index = var_index
+
+        # var_exp = var_index - 1
+        # var_exp[var_exp < 0] = 0 # for differential components
+        # scaling exponent of the error measure is guarded by 0 for 
+        # differential components
+        self.var_exp = np.maximum(0, self.var_index - 1)
+        self.index_algebraic_vars = np.where(self.var_index != 0)[0]
+        self.nvars_algebraic = self.index_algebraic_vars.size
+
         self.direction = np.sign(t_bound - t0) if t_bound != t0 else 1
         self.n = self.y.size
         self.status = 'running'
@@ -182,6 +210,70 @@ class DaeSolver:
         self.nfev = 0
         self.njev = 0
         self.nlu = 0
+
+    def _validate_jac(self, jac, sparsity, wrt_y=True):
+        # TODO: I'm not sure if this can be done in the base class since 
+        # depending on the method y depends on y_dot or vice versa.
+        t0 = self.t
+        y0 = self.y
+        y_dot0 = self.y_dot
+        if jac is None:
+            if sparsity is not None:
+                if issparse(sparsity):
+                    sparsity = csc_matrix(sparsity)
+                groups = group_columns(sparsity)
+                sparsity = (sparsity, groups)
+
+            def jac_wrapped(t, y, y_dot):
+                self.njev += 1
+                f = self.fun_single(t, y, y_dot)
+                # TODO: Maybe check both derivatives at the same time. Hence, 
+                # this will be demistfied.
+                if wrt_y:
+                    J, self.jac_factor = num_jac(
+                        lambda t, y: self.fun_vectorized(t, y, y_dot), t, y, f,
+                        self.atol, self.jac_factor, sparsity,
+                    )
+                else:
+                    J, self.jac_factor = num_jac(
+                        lambda t, y_dot: self.fun_vectorized(t, y, y_dot), t, y_dot, f,
+                        self.atol, self.jac_factor, sparsity,
+                    )
+                return J
+            J = jac_wrapped(t0, y0, y_dot0)
+        elif callable(jac):
+            J = jac(t0, y0, y_dot0)
+            self.njev += 1
+            if issparse(J):
+                J = csc_matrix(J, dtype=np.common_type(y0, y_dot0))
+
+                def jac_wrapped(t, y, y_dot):
+                    self.njev += 1
+                    return csc_matrix(jac(t, y, y_dot), dtype=np.common_type(y0, y_dot0))
+            else:
+                J = np.asarray(J, dtype=np.common_type(y0, y_dot0))
+
+                def jac_wrapped(t, y, y_dot):
+                    self.njev += 1
+                    return np.asarray(jac(t, y, y_dot), dtype=np.common_type(y0, y_dot0))
+
+            if J.shape != (self.n, self.n):
+                raise ValueError("`jac` is expected to have shape {}, but "
+                                    "actually has {}."
+                                    .format((self.n, self.n), J.shape))
+        else:
+            if issparse(jac):
+                J = csc_matrix(jac, dtype=np.common_type(y0, y_dot0))
+            else:
+                J = np.asarray(jac, dtype=np.common_type(y0, y_dot0))
+
+            if J.shape != (self.n, self.n):
+                raise ValueError("`jac` is expected to have shape {}, but "
+                                    "actually has {}."
+                                    .format((self.n, self.n), J.shape))
+            jac_wrapped = None
+
+        return jac_wrapped, J
 
     @property
     def step_size(self):

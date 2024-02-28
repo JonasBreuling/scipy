@@ -6,7 +6,7 @@ from scipy.optimize._numdiff import group_columns
 from .common import (validate_max_step, validate_tol, select_initial_step,
                      norm, num_jac, EPS, warn_extraneous,
                      validate_first_step)
-from .base import OdeSolver, DenseOutput
+from .base import DaeSolver, DenseOutput
 
 S6 = 6 ** 0.5
 
@@ -20,6 +20,18 @@ MU_REAL = 3 + 3 ** (2 / 3) - 3 ** (1 / 3)
 MU_COMPLEX = (3 + 0.5 * (3 ** (1 / 3) - 3 ** (2 / 3))
               - 0.5j * (3 ** (5 / 6) + 3 ** (7 / 6)))
 
+# TODO: Document why this solve uses
+# TI @ La @ T = [[gamma,     0,      0],
+#                     0, alpha,   beta],
+#                     0, -beta,  alpha]]
+# instead of 
+# TI @ La @ T = [[gamma,     0,      0],
+#                     0, alpha,  -beta],
+#                     0,  beta,  alpha]]
+# , i.e., the "classical one" of Ernst Hairer.
+# The transformation matrices are somehow "nicer" but is this mentioned somewhere?
+# See the discussion https://fortran-lang.discourse.group/t/bug-hunting-in-old-f77-code/3431
+# and https://github.com/SciML/OrdinaryDiffEq.jl/blob/master/src/tableaus/firk_tableaus.jl
 # These are transformation matrices.
 T = np.array([
     [0.09443876248897524, -0.14125529502095421, 0.03002919410514742],
@@ -40,11 +52,16 @@ P = np.array([
     [1/3, -8/3, 10/3]])
 
 
+# TODO: Let the user define other values here
 NEWTON_MAXITER = 6  # Maximum number of Newton iterations.
 MIN_FACTOR = 0.2  # Minimum allowed decrease in a step size.
 MAX_FACTOR = 10  # Maximum allowed increase in a step size.
 
 
+# TODO: Utilize second order system
+# [[I, 0], [u'    [v,
+#  [0, 0]]  v'] =  f(t, u, v)]
+# see Hairer1999 after (24).
 def solve_collocation_system(fun, t, y, h, Z0, scale, tol,
                              LU_real, LU_complex, solve_lu):
     """Solve the collocation system.
@@ -136,6 +153,7 @@ def solve_collocation_system(fun, t, y, h, Z0, scale, tol,
     return converged, k + 1, Z, rate
 
 
+# TODO: Let the user chose which error measure to use.
 def predict_factor(h_abs, h_abs_old, error_norm, error_norm_old):
     """Predict by which factor to increase/decrease the step size.
 
@@ -176,7 +194,7 @@ def predict_factor(h_abs, h_abs_old, error_norm, error_norm_old):
     return factor
 
 
-class Radau(OdeSolver):
+class Radau(DaeSolver):
     """Implicit Runge-Kutta method of Radau IIA family of order 5.
 
     The implementation follows [1]_. The error is controlled with a
@@ -195,6 +213,10 @@ class Radau(OdeSolver):
         Initial time.
     y0 : array_like, shape (n,)
         Initial state.
+    y_dot0 : array_like, shape (n,), optional
+        Initial derivative. If the derivative is not given by the user, it is 
+        esimated using the procedure outlined in [3]_. TODO: How is this done 
+        in DASSL?
     t_bound : float
         Boundary time - the integration won't continue beyond it. It also
         determines the direction of the integration.
@@ -291,12 +313,15 @@ class Radau(OdeSolver):
     .. [2] A. Curtis, M. J. D. Powell, and J. Reid, "On the estimation of
            sparse Jacobian matrices", Journal of the Institute of Mathematics
            and its Applications, 13, pp. 117-120, 1974.
+    .. [3] L. F. Shampine, "Solving 0 = F(t,y(t),y'(t)) in Matlab", Journal 
+           of Numerical Mathematics, vol. 10, no. 4, pp. 291-310, 2002.
     """
-    def __init__(self, fun, t0, y0, t_bound, max_step=np.inf,
-                 rtol=1e-3, atol=1e-6, jac=None, jac_sparsity=None,
-                 vectorized=False, first_step=None, **extraneous):
+    def __init__(self, fun, t0, y0, y_dot0, t_bound, var_index, 
+                 max_step=np.inf, rtol=1e-3, atol=1e-6, jac=None, 
+                 jac_sparsity=None, vectorized=False, first_step=None, 
+                 **extraneous):
         warn_extraneous(extraneous)
-        super().__init__(fun, t0, y0, t_bound, vectorized)
+        super().__init__(fun, t0, y0, y_dot0, t_bound, var_index, vectorized)
         self.y_old = None
         self.max_step = validate_max_step(max_step)
         self.rtol, self.atol = validate_tol(rtol, atol, self.n)

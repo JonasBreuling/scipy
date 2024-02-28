@@ -100,6 +100,7 @@ def select_initial_step(fun, t0, y0, f0, direction, order, rtol, atol):
     .. [1] E. Hairer, S. P. Norsett G. Wanner, "Solving Ordinary Differential
            Equations I: Nonstiff Problems", Sec. II.4.
     """
+    raise NotImplementedError("select_initial_step has to be adapted for DAE's")
     if y0.size == 0:
         return np.inf
 
@@ -123,8 +124,8 @@ def select_initial_step(fun, t0, y0, f0, direction, order, rtol, atol):
     return min(100 * h0, h1)
 
 
-class OdeSolution:
-    """Continuous ODE solution.
+class DaeSolution:
+    """Continuous DAE solution.
 
     It is organized as a collection of `DenseOutput` objects which represent
     local interpolants. It provides an algorithm to select a right interpolant

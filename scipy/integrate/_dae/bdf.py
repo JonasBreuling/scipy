@@ -6,7 +6,7 @@ from scipy.optimize._numdiff import group_columns
 from .common import (validate_max_step, validate_tol, select_initial_step,
                      norm, EPS, num_jac, validate_first_step,
                      warn_extraneous)
-from .base import OdeSolver, DenseOutput
+from .base import DaeSolver, DenseOutput
 
 
 MAX_ORDER = 5
@@ -69,7 +69,7 @@ def solve_bdf_system(fun, t_new, y_predict, c, psi, LU, solve_lu, scale, tol):
     return converged, k + 1, y, d
 
 
-class BDF(OdeSolver):
+class BDF(DaeSolver):
     """Implicit method based on backward-differentiation formulas.
 
     This is a variable order method with the order varying automatically from
@@ -194,12 +194,13 @@ class BDF(OdeSolver):
            sparse Jacobian matrices", Journal of the Institute of Mathematics
            and its Applications, 13, pp. 117-120, 1974.
     """
-    def __init__(self, fun, t0, y0, t_bound, max_step=np.inf,
-                 rtol=1e-3, atol=1e-6, jac=None, jac_sparsity=None,
+    def __init__(self, fun, t0, y0, y_dot0, t_bound, var_index, 
+                 max_step=np.inf, rtol=1e-3, atol=1e-6, jac_y=None, 
+                 jac_y_dot=None, jac_sparsity_y=None, jac_sparsity_y_dot=None, 
                  vectorized=False, first_step=None, **extraneous):
         warn_extraneous(extraneous)
-        super().__init__(fun, t0, y0, t_bound, vectorized,
-                         support_complex=True)
+        super().__init__(fun, t0, y0, y_dot0, t_bound, var_index, 
+                         vectorized, support_complex=True)
         self.max_step = validate_max_step(max_step)
         self.rtol, self.atol = validate_tol(rtol, atol, self.n)
         f = self.fun(self.t, self.y)
@@ -215,8 +216,12 @@ class BDF(OdeSolver):
         self.newton_tol = max(10 * EPS / rtol, min(0.03, rtol ** 0.5))
 
         self.jac_factor = None
-        self.jac, self.J = self._validate_jac(jac, jac_sparsity)
-        if issparse(self.J):
+        self.jac_y, self.J_y = self._validate_jac(jac_y, jac_sparsity_y, wrt_y=True)
+        self.jac_y_dot, self.J_y_dot = self._validate_jac(jac_y_dot, jac_sparsity_y_dot, wrt_y=False)
+        if issparse(self.J_y) or issparse(self.J_y_dot):
+            if issparse(self.J_y) and issparse(self.J_y_dot):
+                raise ValueError("If one Jacobian is sparse both have to be sparse.")
+
             def lu(A):
                 self.nlu += 1
                 return splu(A)
@@ -252,59 +257,6 @@ class BDF(OdeSolver):
         self.order = 1
         self.n_equal_steps = 0
         self.LU = None
-
-    def _validate_jac(self, jac, sparsity):
-        t0 = self.t
-        y0 = self.y
-
-        if jac is None:
-            if sparsity is not None:
-                if issparse(sparsity):
-                    sparsity = csc_matrix(sparsity)
-                groups = group_columns(sparsity)
-                sparsity = (sparsity, groups)
-
-            def jac_wrapped(t, y):
-                self.njev += 1
-                f = self.fun_single(t, y)
-                J, self.jac_factor = num_jac(self.fun_vectorized, t, y, f,
-                                             self.atol, self.jac_factor,
-                                             sparsity)
-                return J
-            J = jac_wrapped(t0, y0)
-        elif callable(jac):
-            J = jac(t0, y0)
-            self.njev += 1
-            if issparse(J):
-                J = csc_matrix(J, dtype=y0.dtype)
-
-                def jac_wrapped(t, y):
-                    self.njev += 1
-                    return csc_matrix(jac(t, y), dtype=y0.dtype)
-            else:
-                J = np.asarray(J, dtype=y0.dtype)
-
-                def jac_wrapped(t, y):
-                    self.njev += 1
-                    return np.asarray(jac(t, y), dtype=y0.dtype)
-
-            if J.shape != (self.n, self.n):
-                raise ValueError("`jac` is expected to have shape {}, but "
-                                 "actually has {}."
-                                 .format((self.n, self.n), J.shape))
-        else:
-            if issparse(jac):
-                J = csc_matrix(jac, dtype=y0.dtype)
-            else:
-                J = np.asarray(jac, dtype=y0.dtype)
-
-            if J.shape != (self.n, self.n):
-                raise ValueError("`jac` is expected to have shape {}, but "
-                                 "actually has {}."
-                                 .format((self.n, self.n), J.shape))
-            jac_wrapped = None
-
-        return jac_wrapped, J
 
     def _step_impl(self):
         t = self.t
